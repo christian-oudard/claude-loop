@@ -17,7 +17,7 @@ import sys
 import os
 
 INITIAL_PROMPT = """\
-Loop activated. Work incrementally: implement one piece, verify it, then \
+Loop iteration 1. Work incrementally: implement one piece, verify it, then \
 stop. You will be re-prompted with the task after each iteration.
 
 ## Task
@@ -26,7 +26,7 @@ stop. You will be re-prompted with the task after each iteration.
 """
 
 CONTINUATION_PROMPT = """\
-# Loop iteration
+# Loop iteration {iteration}
 
 You are in a coding loop. Your context may have been compacted — do not \
 assume you remember prior iterations. Re-orient yourself by reading files \
@@ -88,7 +88,7 @@ def main():
 def start():
     # Write a placeholder loop file. The first hook invocation will fill in
     # the prompt from the transcript (which it gets reliably via the event).
-    write_loop_file(0, None)
+    write_loop_file(0, None, 0)
 
 
 def hook():
@@ -112,18 +112,22 @@ def hook():
         if result is None or result == 'stop':
             delete_loop_file()
             return
-        n, prompt = result
+        total, prompt = result
+        # The initial prompt starts the first work iteration, so decrement
+        # before writing so the next hook sees the correct remaining count.
+        remaining = total - 1
     else:
-        n = loop_data['n']
+        remaining = loop_data['remaining']
         prompt = loop_data['prompt']
-
-    n -= 1
+        total = loop_data['total']
+        remaining -= 1
+        iteration = total - remaining
 
     # Check whether there was a completion keyword given by the agent.
     last_msg = event.get('last_assistant_message', '')
     keyword = find_keyword(last_msg)
 
-    if n <= 0:
+    if remaining <= 0:
         # Iterations exhausted — end the loop.
         delete_loop_file()
         print(json.dumps({
@@ -139,18 +143,21 @@ def hook():
         }))
     elif keyword == 'TASK_COMPLETE':
         # First claim — enter verification iteration.
-        write_loop_file(n, prompt)
+        write_loop_file(remaining, prompt, total)
         print(json.dumps({
             "decision": "block",
             "reason": VERIFICATION_PROMPT.format(prompt=prompt),
         }))
     else:
         # Normal continuation. Covers REVIEW_INCOMPLETE, no keyword, and first call.
-        write_loop_file(n, prompt)
-        reason = INITIAL_PROMPT if first else CONTINUATION_PROMPT
+        write_loop_file(remaining, prompt, total)
+        if first:
+            reason = INITIAL_PROMPT.format(prompt=prompt)
+        else:
+            reason = CONTINUATION_PROMPT.format(prompt=prompt, iteration=iteration)
         print(json.dumps({
             "decision": "block",
-            "reason": reason.format(prompt=prompt),
+            "reason": reason,
         }))
 
 
@@ -162,8 +169,8 @@ def read_loop_file():
         return json.load(path.open())
 
 
-def write_loop_file(n, prompt):
-    json.dump({'n': n, 'prompt': prompt}, loop_file_path().open('w'))
+def write_loop_file(remaining, prompt, total):
+    json.dump({'remaining': remaining, 'prompt': prompt, 'total': total}, loop_file_path().open('w'))
 
 
 def delete_loop_file():
