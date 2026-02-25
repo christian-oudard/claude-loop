@@ -89,7 +89,6 @@ def start():
     # Write a placeholder loop file. The first hook invocation will fill in
     # the prompt from the transcript (which it gets reliably via the event).
     write_loop_file(0, None)
-    print("Loop activated. Starting on the task now.")
 
 
 def hook():
@@ -110,7 +109,7 @@ def hook():
     first = loop_data['prompt'] is None
     if first:
         result = parse_loop_args(transcript_path)
-        if result is None:
+        if result is None or result == 'stop':
             delete_loop_file()
             return
         n, prompt = result
@@ -204,7 +203,10 @@ def parse_loop_args(transcript_path):
             content, re.DOTALL,
         )
         if m:
-            parts = m.group(1).strip().split(None, 1)
+            args = m.group(1).strip()
+            if args == 'stop':
+                return 'stop'
+            parts = args.split(None, 1)
             assert len(parts) == 2, "Expected: /loop NUM_ITERATIONS TASK"
             return int(parts[0]), parts[1]
 

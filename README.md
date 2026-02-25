@@ -1,6 +1,6 @@
 # claude-loop
 
-A coding loop for [Claude Code](https://claude.ai/code) that re-prompts the agent after each iteration, with a verification step before completion.
+An improved coding loop for Claude Code
 
 ## How it works
 
@@ -15,12 +15,12 @@ Any iteration  → n hits 0         → done (iterations exhausted)
 
 ## Install
 
+With uv:
 ```bash
 uv tool install claude-loop
 ```
 
 Or with pipx:
-
 ```bash
 pipx install claude-loop
 ```
@@ -31,10 +31,6 @@ pipx install claude-loop
 
 Copy `commands/loop.md` to `~/.claude/commands/loop.md`:
 
-```bash
-mkdir -p ~/.claude/commands
-cp commands/loop.md ~/.claude/commands/loop.md
-```
 
 ### 2. Add the stop hook
 
@@ -60,7 +56,7 @@ Add this to your `~/.claude/settings.json` under `"hooks"`:
 
 ## Usage
 
-In any Claude Code session:
+In Claude Code:
 
 ```
 /loop 10 Implement a function that solves the traveling salesman problem
@@ -75,9 +71,3 @@ To cancel a running loop:
 ```
 
 Or run `claude-loop stop` from a terminal in the project directory.
-
-## Requirements
-
-- Claude Code v2.1+
-- Python 3.10+
-- The project must have a `.claude/` directory (run `claude` in the project at least once)
