@@ -17,7 +17,9 @@ import sys
 import os
 
 INITIAL_PROMPT = """\
-Loop iteration 1. Work incrementally: implement one piece, verify it, then \
+# Loop iteration 1
+
+You are in a coding loop. Work incrementally: implement one piece, verify it, then \
 stop. You will be re-prompted with the task after each iteration.
 
 ## Task
@@ -28,8 +30,7 @@ stop. You will be re-prompted with the task after each iteration.
 CONTINUATION_PROMPT = """\
 # Loop iteration {iteration}
 
-You are in a coding loop. Your context may have been compacted — do not \
-assume you remember prior iterations. Re-orient yourself by reading files \
+You are in a coding loop. Re-orient yourself by reading files \
 and checking git status/log to understand what has already been done.
 
 Work incrementally: pick one concrete piece of the task, implement it, and \
@@ -53,7 +54,7 @@ attempts — use them.
 """
 
 VERIFICATION_PROMPT = """\
-# Verification iteration
+# Verification
 
 You indicated the task is complete. Before confirming, do a thorough review:
 
