@@ -16,37 +16,16 @@ import re
 import sys
 import os
 
-INITIAL_PROMPT = """\
-# Loop iteration 1
-
-You are in a coding loop. Work incrementally: implement one piece, verify it, then \
-stop. You will be re-prompted with the task after each iteration.
-
-## Task
-
-{prompt}
-"""
-
-CONTINUATION_PROMPT = """\
+WORK_PROMPT = """\
 # Loop iteration {iteration}
 
-You are in a coding loop. Re-orient yourself by reading files \
-and checking git status/log to understand what has already been done.
+You are in a coding loop. Orient yourself by reading files and checking \
+git status/log. Work incrementally: implement one piece, verify it works, \
+then stop. You will be re-prompted after each iteration.
 
-Work incrementally: pick one concrete piece of the task, implement it, and \
-verify it works (run tests, lint, or inspect output). Then stop. Do not try \
-to finish everything in one iteration.
-
-## Early completion
-
-If the task is genuinely and fully complete, output exactly the words \
-TASK_COMPLETE as a standalone message (nothing else).
-
-You MUST NOT output this unless the task is unequivocally done. Do not use \
-it to escape the loop because you feel stuck, think the task is impossible, \
-or want to stop for any other reason. If you are stuck, use the next \
-iteration to try a different approach. The loop exists to give you multiple \
-attempts — use them.
+If the task is genuinely and fully complete, output exactly TASK_COMPLETE \
+as a standalone message. Do not use it to escape the loop because you are \
+stuck — use the next iteration to try a different approach.
 
 ## Task
 
@@ -117,6 +96,7 @@ def hook():
         # The initial prompt starts the first work iteration, so decrement
         # before writing so the next hook sees the correct remaining count.
         remaining = total - 1
+        iteration = 1
     else:
         remaining = loop_data['remaining']
         prompt = loop_data['prompt']
@@ -152,10 +132,7 @@ def hook():
     else:
         # Normal continuation. Covers REVIEW_INCOMPLETE, no keyword, and first call.
         write_loop_file(remaining, prompt, total)
-        if first:
-            reason = INITIAL_PROMPT.format(prompt=prompt)
-        else:
-            reason = CONTINUATION_PROMPT.format(prompt=prompt, iteration=iteration)
+        reason = WORK_PROMPT.format(prompt=prompt, iteration=iteration)
         print(json.dumps({
             "decision": "block",
             "reason": reason,
