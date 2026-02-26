@@ -77,6 +77,10 @@ def strip_ansi(text):
     return text
 
 
+# Input prompt marker: Claude Code shows "shift+tab" hint when ready for input.
+INPUT_READY = b"shift+tab"
+
+
 # --- Test infrastructure ---
 
 class ClaudePTY:
@@ -146,25 +150,31 @@ echo "$EVENT" | python3 {PROJECT_ROOT}/claude_loop.py hook
         assert found, "Claude failed to show trust dialog"
         os.write(fd, b"\r")  # Press Enter to confirm trust
 
-        # Wait for the input prompt (bypass permissions badge appears)
-        _, found = pty_read_until(fd, b"bypass", timeout=20)
+        # Wait for input prompt
+        _, found = pty_read_until(fd, INPUT_READY, timeout=20)
         assert found, "Claude failed to reach input prompt"
-
-        # Let the TUI finish rendering
-        time.sleep(1)
         pty_drain(fd, timeout=1)
 
     def submit(self, text):
-        """Type text and press Enter. Adds a delay so the TUI registers input."""
+        """Type text and press Enter. Waits for TUI to register the input."""
         if isinstance(text, str):
             text = text.encode()
         os.write(self.fd, text)
-        time.sleep(0.5)
+        # Wait for the TUI to echo back at least the first few characters,
+        # confirming it registered the input before we press Enter.
+        prefix = text[:8]
+        pty_read_until(self.fd, prefix, timeout=5)
         os.write(self.fd, b"\r")
 
     def send_escape(self):
         """Send Escape key to interrupt current turn."""
         os.write(self.fd, ESC)
+
+    def wait_for_input_ready(self, timeout=30):
+        """Wait for the input prompt to appear (TUI ready for commands)."""
+        buf, found = pty_read_until(self.fd, INPUT_READY, timeout=timeout)
+        pty_drain(self.fd, timeout=0.5)
+        return found
 
     def wait_for(self, pattern, timeout=90):
         """Wait for pattern to appear in terminal output."""
@@ -183,20 +193,26 @@ echo "$EVENT" | python3 {PROJECT_ROOT}/claude_loop.py hook
                 return True
             # Drain output to keep the PTY buffer from filling up
             pty_drain(self.fd, timeout=0.5)
-            time.sleep(0.5)
+        return False
+
+    def wait_for_loop_end(self, timeout=180):
+        """Wait until loop.json is deleted (loop finished)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            pty_drain(self.fd, timeout=0.5)
+            if not self.loop_file_exists() and self.count_hook_calls() >= 1:
+                return True
         return False
 
     def wait_for_exit(self, timeout=30):
         """Wait for the claude process to exit."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            # Drain to prevent buffer blocking
             pty_drain(self.fd, timeout=0.5)
             result = os.waitpid(self.pid, os.WNOHANG)
             if result[0] != 0:
                 self.pid = None
                 return True
-            time.sleep(0.5)
         return False
 
     def count_hook_calls(self):
@@ -233,17 +249,26 @@ echo "$EVENT" | python3 {PROJECT_ROOT}/claude_loop.py hook
             self.pid = None
 
 
+E2E_TIMEOUT = 120  # seconds per test
+
+
 @pytest.fixture
 def claude(tmp_path):
-    """Fixture that provides a started ClaudePTY instance."""
+    """Fixture that provides a started ClaudePTY instance with a timeout."""
+    prev = signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(
+        TimeoutError(f"E2E test exceeded {E2E_TIMEOUT}s timeout")))
+    signal.alarm(E2E_TIMEOUT)
+
     c = ClaudePTY(tmp_path)
     c.spawn()
     yield c
+
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, prev)
     # Try graceful exit
     try:
         c.send_escape()
-        time.sleep(1)
-        pty_drain(c.fd, timeout=1)
+        c.wait_for_input_ready(timeout=10)
         c.submit("/exit")
         c.wait_for_exit(timeout=5)
     except OSError:
@@ -251,18 +276,21 @@ def claude(tmp_path):
     c.cleanup()
 
 
-# --- Tests ---
+# --- Test tasks ---
+# Designed for haiku: extremely explicit, no ambiguity, no state tracking needed.
 
 COUNTING_TASK = (
     "Say one number per loop, counting upward. "
-    "Use number words, not digits."
+    "Use number words, not digits. This task is never complete."
 )
 
 STOP_AT_FIVE_TASK = (
-    "Say one number per loop, counting upward. "
-    "Use number words, not digits. Stop counting after the number five."
+    "Say one number per loop, counting upward. Use number words, not digits. "
+    "The task is complete once you have said the number five."
 )
 
+
+# --- Tests ---
 
 class TestIterationExhaustion:
     """Test: /loop 3 <counting task>
@@ -273,7 +301,6 @@ class TestIterationExhaustion:
     def test_runs_three_iterations(self, claude):
         claude.submit(f"/loop 3 {COUNTING_TASK}")
 
-        # Wait for the loop to finish (loop.json gets deleted when exhausted)
         got_enough = claude.wait_for_hook_calls(3, timeout=120)
         hooks = claude.parse_hook_log()
 
@@ -282,9 +309,8 @@ class TestIterationExhaustion:
             f"Messages: {[h.get('last_assistant_message', '')[:40] for h in hooks]}"
         )
 
-        # Give loop a moment to clean up
-        time.sleep(2)
-        claude.drain(timeout=2)
+        # Wait for the loop to clean up
+        claude.wait_for_loop_end(timeout=30)
 
         assert not claude.loop_file_exists(), \
             "Loop file should be deleted when iterations exhausted"
@@ -293,9 +319,7 @@ class TestIterationExhaustion:
         claude.submit(f"/loop 2 {COUNTING_TASK}")
 
         claude.wait_for_hook_calls(2, timeout=120)
-        # Wait for cleanup
-        time.sleep(2)
-        claude.drain(timeout=2)
+        claude.wait_for_loop_end(timeout=30)
 
         hooks = claude.parse_hook_log()
         for hook in hooks:
@@ -314,14 +338,7 @@ class TestEarlyCompletion:
     def test_completes_before_iteration_limit(self, claude):
         claude.submit(f"/loop 10 {STOP_AT_FIVE_TASK}")
 
-        # Wait for completion — loop should finish before 10 iterations
-        # We poll until loop.json is gone or we time out
-        deadline = time.monotonic() + 180
-        while time.monotonic() < deadline:
-            claude.drain(timeout=1)
-            if not claude.loop_file_exists() and claude.count_hook_calls() >= 2:
-                break
-            time.sleep(1)
+        claude.wait_for_loop_end(timeout=180)
 
         hooks = claude.parse_hook_log()
         hook_msgs = [h.get("last_assistant_message", "") for h in hooks]
@@ -336,12 +353,7 @@ class TestEarlyCompletion:
     def test_task_complete_detected(self, claude):
         claude.submit(f"/loop 10 {STOP_AT_FIVE_TASK}")
 
-        deadline = time.monotonic() + 180
-        while time.monotonic() < deadline:
-            claude.drain(timeout=1)
-            if not claude.loop_file_exists() and claude.count_hook_calls() >= 2:
-                break
-            time.sleep(1)
+        claude.wait_for_loop_end(timeout=180)
 
         hooks = claude.parse_hook_log()
         hook_msgs = [h.get("last_assistant_message", "") for h in hooks]
@@ -370,25 +382,16 @@ class TestLoopStop:
             f"Expected 2+ iterations before stopping, got {claude.count_hook_calls()}"
         )
 
-        # Send Escape to interrupt current turn
+        # Send Escape and wait for input prompt (no sleep!)
         claude.send_escape()
-
-        # Wait for the input prompt to reappear
-        _, found = pty_read_until(claude.fd, b"shift+tab", timeout=15)
-        assert found, "Prompt did not reappear after Escape"
-        time.sleep(1)
-        pty_drain(claude.fd, timeout=1)
+        ready = claude.wait_for_input_ready(timeout=15)
+        assert ready, "Prompt did not reappear after Escape"
 
         # Submit /loop stop
         claude.submit("/loop stop")
 
-        # Wait for loop file to be deleted (stop processed)
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            pty_drain(claude.fd, timeout=1)
-            if not claude.loop_file_exists():
-                break
-            time.sleep(0.5)
+        # Wait for loop file to be deleted
+        claude.wait_for_loop_end(timeout=30)
 
         hooks = claude.parse_hook_log()
         assert len(hooks) < 10, (

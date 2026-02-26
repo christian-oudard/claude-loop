@@ -7,5 +7,7 @@ hide-from-slash-command-tool: "true"
 /loop $ARGUMENTS
 
 ```!
-claude-loop
+claude-loop <<'_LOOP_ARGS_'
+$ARGUMENTS
+_LOOP_ARGS_
 ```

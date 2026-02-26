@@ -12,9 +12,7 @@ Usage:
 
 from pathlib import Path
 import json
-import re
 import sys
-import os
 
 WORK_PROMPT = """\
 # Loop iteration {iteration}
@@ -69,14 +67,31 @@ def start():
     if dot_claude_dir() is None:
         print("Not in a project, or there is no .claude directory.", file=sys.stderr)
         sys.exit(1)
-    # Don't overwrite an active loop (e.g. /loop stop runs start() via the
-    # slash command but should not clobber state — the hook handles stop).
-    existing = read_loop_file()
-    if existing and existing.get('prompt') is not None:
+
+    raw = sys.stdin.read().strip() if not sys.stdin.isatty() else ''
+
+    if raw == 'stop':
+        delete_loop_file()
+        print('Loop stopped.')
         return
-    # Write a placeholder loop file. The first hook invocation will fill in
-    # the prompt from the transcript (which it gets reliably via the event).
-    write_loop_file(0, None, 0)
+
+    # Don't overwrite an active loop.
+    if read_loop_file():
+        return
+
+    if not raw:
+        print("Usage: /loop NUM_ITERATIONS TASK", file=sys.stderr)
+        sys.exit(1)
+
+    parts = raw.split(None, 1)
+    if len(parts) < 2:
+        print("Usage: /loop NUM_ITERATIONS TASK", file=sys.stderr)
+        sys.exit(1)
+
+    total = int(parts[0])
+    prompt = parts[1]
+    # The initial Claude response (from the slash command text) is iteration 1.
+    write_loop_file(1, prompt, total)
 
 
 def hook():
@@ -90,33 +105,15 @@ def hook():
     if event['hook_event_name'] != 'Stop':
         return
 
-    transcript_path = event.get('transcript_path')
-
-    # On the first hook call, the prompt is null — parse it from the transcript.
-    # If parsing fails (stray loop.json from a previous session), clean up silently.
-    first = loop_data['prompt'] is None
-    if first:
-        result = parse_loop_args(transcript_path)
-        if result is None or result == 'stop':
-            delete_loop_file()
-            return
-        total, prompt = result
-        # The initial prompt starts the first work iteration, so decrement
-        # before writing so the next hook sees the correct remaining count.
-        remaining = total - 1
-        iteration = 1
-    else:
-        remaining = loop_data['remaining']
-        prompt = loop_data['prompt']
-        total = loop_data['total']
-        remaining -= 1
-        iteration = total - remaining
+    prompt = loop_data['prompt']
+    iteration = loop_data['iteration'] + 1
+    total = loop_data['total']
 
     # Check whether there was a completion keyword given by the agent.
     last_msg = event.get('last_assistant_message', '')
     keyword = find_keyword(last_msg)
 
-    if remaining <= 0:
+    if iteration > total:
         # Iterations exhausted — end the loop.
         delete_loop_file()
         print(json.dumps({
@@ -132,14 +129,14 @@ def hook():
         }))
     elif keyword == 'TASK_COMPLETE':
         # First claim — enter verification iteration.
-        write_loop_file(remaining, prompt, total)
+        write_loop_file(iteration, prompt, total)
         print(json.dumps({
             "decision": "block",
             "reason": VERIFICATION_PROMPT.format(prompt=prompt),
         }))
     else:
         # Normal continuation. Covers REVIEW_INCOMPLETE, no keyword, and first call.
-        write_loop_file(remaining, prompt, total)
+        write_loop_file(iteration, prompt, total)
         reason = WORK_PROMPT.format(prompt=prompt, iteration=iteration)
         print(json.dumps({
             "decision": "block",
@@ -155,8 +152,8 @@ def read_loop_file():
         return json.load(path.open())
 
 
-def write_loop_file(remaining, prompt, total):
-    json.dump({'remaining': remaining, 'prompt': prompt, 'total': total}, loop_file_path().open('w'))
+def write_loop_file(iteration, prompt, total):
+    json.dump({'iteration': iteration, 'prompt': prompt, 'total': total}, loop_file_path().open('w'))
 
 
 def delete_loop_file():
@@ -181,32 +178,6 @@ def dot_claude_dir():
     return None
 
 
-# Transcript parsing.
-
-def parse_loop_args(transcript_path):
-    """Find the /loop invocation in the transcript and return (n, prompt)."""
-    for line in reverse_lines(transcript_path):
-        msg = json.loads(line)
-        if msg.get('type') != 'user':
-            continue
-        content = msg.get('message', {}).get('content')
-        if not isinstance(content, str):
-            continue
-        m = re.search(
-            r'<command-name>/loop</command-name>.*?<command-args>(.*?)</command-args>',
-            content, re.DOTALL,
-        )
-        if m:
-            args = m.group(1).strip()
-            if args == 'stop':
-                return 'stop'
-            parts = args.split(None, 1)
-            assert len(parts) == 2, "Expected: /loop NUM_ITERATIONS TASK"
-            return int(parts[0]), parts[1]
-
-    return None
-
-
 def find_keyword(text):
     """Check text for a loop keyword.
 
@@ -216,30 +187,6 @@ def find_keyword(text):
         if kw in text:
             return kw
     return None
-
-
-def reverse_lines(path, block_size=4096):
-    """Yield lines from a file in reverse order."""
-    size = os.path.getsize(path)
-    if size == 0:
-        return
-    with open(path, 'rb') as f:
-        remainder = b''
-        pos = size
-        while pos > 0:
-            read_size = min(block_size, pos)
-            pos -= read_size
-            f.seek(pos)
-            chunk = f.read(read_size) + remainder
-            lines = chunk.split(b'\n')
-            remainder = lines[0] if pos > 0 else b''
-            start = 1 if pos > 0 else 0
-            for line in reversed(lines[start:]):
-                line = line.strip()
-                if line:
-                    yield line.decode()
-        if remainder.strip():
-            yield remainder.strip().decode()
 
 
 if __name__ == '__main__':
