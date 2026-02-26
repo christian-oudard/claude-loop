@@ -66,6 +66,9 @@ def main():
 
 
 def start():
+    if dot_claude_dir() is None:
+        print("Not in a project, or there is no .claude directory.", file=sys.stderr)
+        sys.exit(1)
     # Write a placeholder loop file. The first hook invocation will fill in
     # the prompt from the transcript (which it gets reliably via the event).
     write_loop_file(0, None, 0)
@@ -143,7 +146,7 @@ def hook():
 
 def read_loop_file():
     path = loop_file_path()
-    if path.exists():
+    if path and path.exists():
         return json.load(path.open())
 
 
@@ -152,11 +155,14 @@ def write_loop_file(remaining, prompt, total):
 
 
 def delete_loop_file():
-    loop_file_path().unlink(missing_ok=True)
+    path = loop_file_path()
+    if path:
+        path.unlink(missing_ok=True)
 
 
 def loop_file_path():
-    return dot_claude_dir() / 'loop.json'
+    d = dot_claude_dir()
+    return d / 'loop.json' if d else None
 
 
 def dot_claude_dir():
@@ -167,9 +173,7 @@ def dot_claude_dir():
         dot_claude = p / '.claude'
         if dot_claude.exists():
             return dot_claude
-
-    print("Not in a project, or there is no .claude directory.", file=sys.stderr)
-    sys.exit(1)
+    return None
 
 
 # Transcript parsing.
