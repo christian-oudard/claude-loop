@@ -46,8 +46,24 @@ def run_claude_loop(cwd, func, stdin_text):
     return result
 
 
+def run_main(cwd, args, stdin_text=""):
+    """Run claude_loop.main() as a subprocess with given argv and stdin."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT)
+    argv = ["claude-loop"] + args
+    code = f"import sys; sys.argv = {argv!r}; import claude_loop; claude_loop.main()"
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        input=stdin_text, capture_output=True, text=True, cwd=str(cwd), env=env,
+    )
+
+
 def run_start(cwd, stdin_text):
     return run_claude_loop(cwd, "start", stdin_text)
+
+
+def run_status(cwd):
+    return run_claude_loop(cwd, "status", "")
 
 
 def run_hook(cwd, event):

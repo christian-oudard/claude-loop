@@ -59,6 +59,8 @@ def main():
     elif len(sys.argv) > 1 and sys.argv[1] == 'stop':
         delete_loop_file()
         print('Loop stopped.')
+    elif len(sys.argv) > 1 and sys.argv[1] == 'status':
+        status()
     else:
         start()
 
@@ -69,11 +71,6 @@ def start():
         sys.exit(1)
 
     raw = sys.stdin.read().strip() if not sys.stdin.isatty() else ''
-
-    if raw == 'stop':
-        delete_loop_file()
-        print('Loop stopped.')
-        return
 
     # Don't overwrite an active loop.
     if read_loop_file():
@@ -92,6 +89,15 @@ def start():
     prompt = parts[1]
     # The initial Claude response (from the slash command text) is iteration 1.
     write_loop_file(1, prompt, total)
+
+
+def status():
+    data = read_loop_file()
+    if data:
+        print(f"Loop active: iteration {data['iteration']}/{data['total']}")
+        print(f"Task: {data['prompt']}")
+    else:
+        print("No active loop.")
 
 
 def hook():

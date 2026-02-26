@@ -1,5 +1,6 @@
 """Unit and integration tests for claude_loop core logic."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -7,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 import claude_loop
 
-from helpers import make_project, read_loop_file, write_loop_file, run_start, run_hook
+from helpers import make_project, read_loop_file, write_loop_file, run_main, run_start, run_status, run_hook
 
 
 # --- Unit tests: find_keyword ---
@@ -31,6 +32,48 @@ class TestFindKeyword:
     def test_priority_task_complete_first(self):
         # TASK_COMPLETE is checked first due to iteration order
         assert claude_loop.find_keyword("TASK_COMPLETE REVIEW_OKAY") == "TASK_COMPLETE"
+
+
+# --- Integration tests: main() dispatch ---
+
+class TestMain:
+    """Test that main() routes to the correct subcommand based on sys.argv."""
+
+    def test_stop_deletes_loop(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        write_loop_file(dot_claude, 2, "task", 5)
+        result = run_main(proj, ["stop"])
+        assert result.returncode == 0
+        assert "Loop stopped" in result.stdout
+        assert read_loop_file(dot_claude) is None
+
+    def test_stop_no_loop(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        result = run_main(proj, ["stop"])
+        assert result.returncode == 0
+        assert read_loop_file(dot_claude) is None
+
+    def test_status_routes(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        write_loop_file(dot_claude, 1, "my task", 3)
+        result = run_main(proj, ["status"])
+        assert result.returncode == 0
+        assert "1/3" in result.stdout
+
+    def test_no_args_routes_to_start(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        result = run_main(proj, [], stdin_text="3 Do stuff")
+        assert result.returncode == 0
+        assert read_loop_file(dot_claude) == {"iteration": 1, "prompt": "Do stuff", "total": 3}
+
+    def test_hook_routes(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        write_loop_file(dot_claude, 1, "task", 5)
+        event = json.dumps({"hook_event_name": "Stop", "last_assistant_message": ""})
+        result = run_main(proj, ["hook"], stdin_text=event)
+        assert result.returncode == 0
+        parsed = json.loads(result.stdout)
+        assert parsed["decision"] == "block"
 
 
 # --- Integration tests: start() reads args from stdin ---
@@ -75,11 +118,37 @@ class TestStart:
         run_start(proj, """2 Fix the "parser" and it's 'edge cases'""")
         assert read_loop_file(dot_claude)["prompt"] == """Fix the "parser" and it's 'edge cases'"""
 
-    def test_stop_deletes_loop(self, tmp_path):
+    def test_no_dot_claude_dir(self, tmp_path):
+        # No .claude directory — should fail.
+        result = run_start(tmp_path, "3 Do stuff")
+        assert result.returncode == 1
+        assert "Not in a project" in result.stderr
+
+    def test_empty_stdin(self, tmp_path):
         proj, dot_claude = make_project(tmp_path)
-        write_loop_file(dot_claude, 3, "task", 5)
-        run_start(proj, "stop")
-        assert read_loop_file(dot_claude) is None
+        result = run_start(proj, "")
+        assert result.returncode == 1
+        assert "Usage" in result.stderr
+
+    def test_missing_task(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        result = run_start(proj, "5")
+        assert result.returncode == 1
+        assert "Usage" in result.stderr
+
+    def test_status_active(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        write_loop_file(dot_claude, 3, "Fix the bug", 5)
+        result = run_status(proj)
+        assert result.returncode == 0
+        assert "3/5" in result.stdout
+        assert "Fix the bug" in result.stdout
+
+    def test_status_inactive(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        result = run_status(proj)
+        assert result.returncode == 0
+        assert "No active loop" in result.stdout
 
     def test_no_overwrite_active_loop(self, tmp_path):
         proj, dot_claude = make_project(tmp_path)
