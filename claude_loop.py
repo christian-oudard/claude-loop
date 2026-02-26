@@ -69,6 +69,11 @@ def start():
     if dot_claude_dir() is None:
         print("Not in a project, or there is no .claude directory.", file=sys.stderr)
         sys.exit(1)
+    # Don't overwrite an active loop (e.g. /loop stop runs start() via the
+    # slash command but should not clobber state — the hook handles stop).
+    existing = read_loop_file()
+    if existing and existing.get('prompt') is not None:
+        return
     # Write a placeholder loop file. The first hook invocation will fill in
     # the prompt from the transcript (which it gets reliably via the event).
     write_loop_file(0, None, 0)

@@ -1,11 +1,7 @@
-"""End-to-end tests for claude-loop using live claude --model haiku instances.
+"""End-to-end tests for claude-loop using PTY-driven claude --model haiku.
 
-Tests the full loop by sending /loop commands via stream-json mode and
-verifying hook behavior through a logging wrapper.
-
-Modeled after the manual smoke tests:
-  /loop 3 Count upward, one number per iteration.
-  /loop 10 Count upward. Stop after five.
+Spawns real Claude Code instances in pseudo-terminals, types commands,
+sends Escape to interrupt, and verifies hook behavior via log files.
 
 Requires: claude CLI, valid API credentials, network access.
 Run with:  pytest tests/test_e2e.py -v -s
@@ -14,15 +10,18 @@ Skip with: SKIP_E2E=1 pytest
 
 import json
 import os
+import pty
+import re
+import select
+import signal
 import shutil
-import subprocess
-import threading
 import time
 from pathlib import Path
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).parent.parent
+ESC = b'\x1b'
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("SKIP_E2E") or shutil.which("claude") is None,
@@ -30,51 +29,85 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-class ClaudeRunner:
-    """Runs claude in stream-json mode with hooks configured in an isolated project."""
+# --- PTY helpers ---
 
-    def __init__(self, tmp_path, *, stop_after_hook=None):
-        """
-        Args:
-            stop_after_hook: If set, delete loop.json after this many hook
-                calls. Simulates `claude-loop stop` / pressing Escape and
-                running /loop stop mid-loop.
-        """
+def pty_read_until(fd, pattern, timeout=60):
+    """Read from PTY fd until pattern found or timeout. Returns (data, found)."""
+    buf = b''
+    deadline = time.monotonic() + timeout
+    if isinstance(pattern, str):
+        pattern = pattern.encode()
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        r, _, _ = select.select([fd], [], [], min(remaining, 0.1))
+        if r:
+            try:
+                data = os.read(fd, 4096)
+                if not data:
+                    break
+                buf += data
+                if pattern in buf:
+                    return buf, True
+            except OSError:
+                break
+    return buf, False
+
+
+def pty_drain(fd, timeout=2.0):
+    """Read all available data from PTY."""
+    buf = b''
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        r, _, _ = select.select([fd], [], [], min(deadline - time.monotonic(), 0.1))
+        if r:
+            try:
+                data = os.read(fd, 4096)
+                if not data:
+                    break
+                buf += data
+            except OSError:
+                break
+    return buf
+
+
+def strip_ansi(text):
+    """Remove ANSI escape sequences from terminal output."""
+    text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+    text = re.sub(r'\x1b\][^\x07]*\x07', '', text)
+    return text
+
+
+# --- Test infrastructure ---
+
+class ClaudePTY:
+    """Drives a Claude Code instance through a pseudo-terminal."""
+
+    def __init__(self, tmp_path):
         self.project_dir = tmp_path / "project"
         self.project_dir.mkdir()
         dot_claude = self.project_dir / ".claude"
         dot_claude.mkdir()
 
-        # Copy /loop slash command into test project
         commands_dst = dot_claude / "commands"
         commands_dst.mkdir()
         shutil.copy(PROJECT_ROOT / "commands" / "loop.md", commands_dst / "loop.md")
 
         self.hook_log = tmp_path / "hook_calls.jsonl"
         self.loop_json = dot_claude / "loop.json"
-        self._setup_hook(tmp_path, stop_after_hook)
+        self._setup_hook(tmp_path)
 
-    def _setup_hook(self, tmp_path, stop_after_hook):
+        self.pid = None
+        self.fd = None
+
+    def _setup_hook(self, tmp_path):
         hook_wrapper = tmp_path / "hook_wrapper.sh"
         self.settings_file = tmp_path / "settings.json"
-
-        # The hook wrapper logs events, optionally runs `claude-loop stop`
-        # after N calls, then delegates to claude-loop hook.
-        stop_logic = ""
-        if stop_after_hook is not None:
-            stop_logic = f"""\
-COUNT=$(wc -l < {self.hook_log})
-if [ "$COUNT" -ge {stop_after_hook} ]; then
-    cd {self.project_dir}
-    python3 {PROJECT_ROOT}/claude_loop.py stop
-fi
-"""
 
         hook_wrapper.write_text(f"""\
 #!/bin/bash
 EVENT=$(cat)
 echo "$EVENT" >> {self.hook_log}
-{stop_logic}cd {self.project_dir}
+cd {self.project_dir}
 echo "$EVENT" | python3 {PROJECT_ROOT}/claude_loop.py hook
 """)
         hook_wrapper.chmod(0o755)
@@ -88,75 +121,93 @@ echo "$EVENT" | python3 {PROJECT_ROOT}/claude_loop.py hook
             },
         }))
 
-    def loop(self, n, task, *, timeout=120):
-        """Send /loop N TASK and wait for completion.
-
-        Returns (messages, hook_calls, timed_out).
-        """
+    def spawn(self):
+        """Spawn claude in a PTY. Must call cleanup() when done."""
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        proc = subprocess.Popen(
-            [
-                "claude", "--model", "haiku", "-p",
-                "--input-format", "stream-json",
-                "--output-format", "stream-json", "--verbose",
+        env["TERM"] = "xterm-256color"
+        env["COLUMNS"] = "120"
+        env["LINES"] = "40"
+
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(str(self.project_dir))
+            os.execvpe("claude", [
+                "claude", "--model", "haiku",
                 "--dangerously-skip-permissions",
                 "--setting-sources", "project,local",
                 "--settings", str(self.settings_file),
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=str(self.project_dir),
-            env=env,
-        )
+            ], env)
 
-        output_lines = []
-        def reader():
-            for line in proc.stdout:
-                line = line.strip()
-                if line:
-                    output_lines.append(line)
+        self.pid = pid
+        self.fd = fd
 
-        t = threading.Thread(target=reader, daemon=True)
-        t.start()
+        # Handle the folder trust dialog
+        _, found = pty_read_until(fd, b"trust", timeout=20)
+        assert found, "Claude failed to show trust dialog"
+        os.write(fd, b"\r")  # Press Enter to confirm trust
 
-        msg = json.dumps({
-            "type": "user",
-            "message": {"role": "user", "content": f"/loop {n} {task}"},
-        })
-        proc.stdin.write(msg + "\n")
-        proc.stdin.flush()
-        proc.stdin.close()
+        # Wait for the input prompt (bypass permissions badge appears)
+        _, found = pty_read_until(fd, b"bypass", timeout=20)
+        assert found, "Claude failed to reach input prompt"
 
-        timed_out = False
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            proc.kill()
-            proc.wait()
+        # Let the TUI finish rendering
+        time.sleep(1)
+        pty_drain(fd, timeout=1)
 
-        t.join(timeout=5)
+    def submit(self, text):
+        """Type text and press Enter. Adds a delay so the TUI registers input."""
+        if isinstance(text, str):
+            text = text.encode()
+        os.write(self.fd, text)
+        time.sleep(0.5)
+        os.write(self.fd, b"\r")
 
-        messages = self._parse_messages(output_lines)
-        hook_calls = self._parse_hook_log()
-        return messages, hook_calls, timed_out
+    def send_escape(self):
+        """Send Escape key to interrupt current turn."""
+        os.write(self.fd, ESC)
 
-    def _parse_messages(self, lines):
-        msgs = []
-        for line in lines:
-            try:
-                m = json.loads(line)
-                if m.get("type") == "assistant":
-                    for c in m.get("message", {}).get("content", []):
-                        if c.get("type") == "text":
-                            msgs.append(c["text"])
-            except json.JSONDecodeError:
-                pass
-        return msgs
+    def wait_for(self, pattern, timeout=90):
+        """Wait for pattern to appear in terminal output."""
+        buf, found = pty_read_until(self.fd, pattern, timeout=timeout)
+        return strip_ansi(buf.decode("utf-8", errors="replace")), found
 
-    def _parse_hook_log(self):
+    def drain(self, timeout=3.0):
+        """Drain remaining output."""
+        return strip_ansi(pty_drain(self.fd, timeout).decode("utf-8", errors="replace"))
+
+    def wait_for_hook_calls(self, n, timeout=120):
+        """Wait until at least n hook calls have been logged."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.count_hook_calls() >= n:
+                return True
+            # Drain output to keep the PTY buffer from filling up
+            pty_drain(self.fd, timeout=0.5)
+            time.sleep(0.5)
+        return False
+
+    def wait_for_exit(self, timeout=30):
+        """Wait for the claude process to exit."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            # Drain to prevent buffer blocking
+            pty_drain(self.fd, timeout=0.5)
+            result = os.waitpid(self.pid, os.WNOHANG)
+            if result[0] != 0:
+                self.pid = None
+                return True
+            time.sleep(0.5)
+        return False
+
+    def count_hook_calls(self):
+        if not self.hook_log.exists():
+            return 0
+        text = self.hook_log.read_text().strip()
+        if not text:
+            return 0
+        return sum(1 for line in text.split("\n") if line.strip())
+
+    def parse_hook_log(self):
         if not self.hook_log.exists():
             return []
         events = []
@@ -168,36 +219,85 @@ echo "$EVENT" | python3 {PROJECT_ROOT}/claude_loop.py hook
     def loop_file_exists(self):
         return self.loop_json.exists()
 
+    def cleanup(self):
+        """Kill the claude process."""
+        if self.pid is not None:
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(self.pid, 0)
+            except ChildProcessError:
+                pass
+            self.pid = None
+
+
+@pytest.fixture
+def claude(tmp_path):
+    """Fixture that provides a started ClaudePTY instance."""
+    c = ClaudePTY(tmp_path)
+    c.spawn()
+    yield c
+    # Try graceful exit
+    try:
+        c.send_escape()
+        time.sleep(1)
+        pty_drain(c.fd, timeout=1)
+        c.submit("/exit")
+        c.wait_for_exit(timeout=5)
+    except OSError:
+        pass
+    c.cleanup()
+
+
+# --- Tests ---
+
+COUNTING_TASK = (
+    "Say one number per loop, counting upward. "
+    "Use number words, not digits."
+)
+
+STOP_AT_FIVE_TASK = (
+    "Say one number per loop, counting upward. "
+    "Use number words, not digits. Stop counting after the number five."
+)
+
 
 class TestIterationExhaustion:
     """Test: /loop 3 <counting task>
 
-    The loop should run for exactly 3 iterations and terminate when
-    iterations are exhausted.
+    The loop should run for 3 iterations and terminate when exhausted.
     """
 
-    TASK = (
-        "We're testing the loop. Say one number per loop, counting upward. "
-        "Use number words, not digits."
-    )
+    def test_runs_three_iterations(self, claude):
+        claude.submit(f"/loop 3 {COUNTING_TASK}")
 
-    def test_runs_three_iterations(self, tmp_path):
-        runner = ClaudeRunner(tmp_path)
-        messages, hooks, timed_out = runner.loop(3, self.TASK)
+        # Wait for the loop to finish (loop.json gets deleted when exhausted)
+        got_enough = claude.wait_for_hook_calls(3, timeout=120)
+        hooks = claude.parse_hook_log()
 
-        assert not timed_out, "Loop should complete within timeout"
-        # 3 work iterations = at least 3 hook calls (plus the exhaustion end)
-        assert len(hooks) >= 3, (
-            f"Expected 3+ hook calls for 3 iterations, got {len(hooks)}. "
+        assert got_enough, (
+            f"Expected 3+ hook calls, got {len(hooks)}. "
             f"Messages: {[h.get('last_assistant_message', '')[:40] for h in hooks]}"
         )
-        assert not runner.loop_file_exists(), \
+
+        # Give loop a moment to clean up
+        time.sleep(2)
+        claude.drain(timeout=2)
+
+        assert not claude.loop_file_exists(), \
             "Loop file should be deleted when iterations exhausted"
 
-    def test_hook_receives_stop_events(self, tmp_path):
-        runner = ClaudeRunner(tmp_path)
-        _, hooks, _ = runner.loop(2, self.TASK)
+    def test_hook_receives_stop_events(self, claude):
+        claude.submit(f"/loop 2 {COUNTING_TASK}")
 
+        claude.wait_for_hook_calls(2, timeout=120)
+        # Wait for cleanup
+        time.sleep(2)
+        claude.drain(timeout=2)
+
+        hooks = claude.parse_hook_log()
         for hook in hooks:
             assert hook["hook_event_name"] == "Stop"
             assert "transcript_path" in hook
@@ -211,30 +311,39 @@ class TestEarlyCompletion:
     and end the loop well before 10 iterations.
     """
 
-    TASK = (
-        "We're testing the loop. Say one number per loop, counting upward. "
-        "Use number words, not digits. Stop counting after the number five."
-    )
+    def test_completes_before_iteration_limit(self, claude):
+        claude.submit(f"/loop 10 {STOP_AT_FIVE_TASK}")
 
-    def test_completes_before_iteration_limit(self, tmp_path):
-        runner = ClaudeRunner(tmp_path)
-        messages, hooks, timed_out = runner.loop(10, self.TASK, timeout=180)
+        # Wait for completion — loop should finish before 10 iterations
+        # We poll until loop.json is gone or we time out
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            claude.drain(timeout=1)
+            if not claude.loop_file_exists() and claude.count_hook_calls() >= 2:
+                break
+            time.sleep(1)
 
-        assert not timed_out, "Loop should complete within timeout"
+        hooks = claude.parse_hook_log()
         hook_msgs = [h.get("last_assistant_message", "") for h in hooks]
 
-        # Loop should end in fewer than 10 hook calls
         assert len(hooks) < 10, (
             f"Expected early completion, got {len(hooks)} hooks. "
             f"Messages: {[m[:40] for m in hook_msgs]}"
         )
-        assert not runner.loop_file_exists(), \
+        assert not claude.loop_file_exists(), \
             "Loop file should be deleted after completion"
 
-    def test_task_complete_detected(self, tmp_path):
-        runner = ClaudeRunner(tmp_path)
-        _, hooks, _ = runner.loop(10, self.TASK, timeout=180)
+    def test_task_complete_detected(self, claude):
+        claude.submit(f"/loop 10 {STOP_AT_FIVE_TASK}")
 
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            claude.drain(timeout=1)
+            if not claude.loop_file_exists() and claude.count_hook_calls() >= 2:
+                break
+            time.sleep(1)
+
+        hooks = claude.parse_hook_log()
         hook_msgs = [h.get("last_assistant_message", "") for h in hooks]
         saw_complete = any("TASK_COMPLETE" in m for m in hook_msgs)
 
@@ -245,28 +354,46 @@ class TestEarlyCompletion:
 
 
 class TestLoopStop:
-    """Test: /loop stop (simulated by deleting loop.json mid-loop).
+    """Test: /loop stop sent mid-loop via Escape + command.
 
-    Start a 10-iteration loop, delete loop.json after 2 hook calls,
-    and verify the loop terminates early without exhausting iterations.
+    Start a 10-iteration loop, wait for 2+ iterations, send Escape to
+    interrupt the current turn, then type /loop stop. Verifies the full
+    stop path through the real TUI.
     """
 
-    TASK = (
-        "We're testing the loop. Say one number per loop, counting upward. "
-        "Use number words, not digits."
-    )
+    def test_stop_terminates_loop(self, claude):
+        claude.submit(f"/loop 10 {COUNTING_TASK}")
 
-    def test_stop_terminates_loop(self, tmp_path):
-        runner = ClaudeRunner(tmp_path, stop_after_hook=2)
-        messages, hooks, timed_out = runner.loop(10, self.TASK, timeout=120)
+        # Wait for at least 2 hook calls (2 iterations done)
+        got_enough = claude.wait_for_hook_calls(2, timeout=120)
+        assert got_enough, (
+            f"Expected 2+ iterations before stopping, got {claude.count_hook_calls()}"
+        )
 
-        assert not timed_out, "Loop should terminate after stop"
-        # Should have roughly 2-3 hook calls: the first 2 fire normally,
-        # then on the 3rd the loop.json is gone so the hook is a no-op
-        # and claude exits.
+        # Send Escape to interrupt current turn
+        claude.send_escape()
+
+        # Wait for the input prompt to reappear
+        _, found = pty_read_until(claude.fd, b"shift+tab", timeout=15)
+        assert found, "Prompt did not reappear after Escape"
+        time.sleep(1)
+        pty_drain(claude.fd, timeout=1)
+
+        # Submit /loop stop
+        claude.submit("/loop stop")
+
+        # Wait for loop file to be deleted (stop processed)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            pty_drain(claude.fd, timeout=1)
+            if not claude.loop_file_exists():
+                break
+            time.sleep(0.5)
+
+        hooks = claude.parse_hook_log()
         assert len(hooks) < 10, (
             f"Expected early stop, got {len(hooks)} hooks. "
             f"Messages: {[h.get('last_assistant_message', '')[:40] for h in hooks]}"
         )
-        assert not runner.loop_file_exists(), \
-            "Loop file should be deleted by stop"
+        assert not claude.loop_file_exists(), \
+            "Loop file should be deleted by /loop stop"
