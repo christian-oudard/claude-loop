@@ -140,9 +140,14 @@ def stop():
     print('Session stopped.')
 
 
-def status():
+def status(short=False):
     from .common import format_remaining
     state = read_session()
+    if short:
+        if state and not state.get('done'):
+            prefix = 'persist --lock' if state.get('lock') else 'persist'
+            print(f"{prefix} {format_remaining(state)}")
+        return
     if not state:
         print("No active session.")
         return

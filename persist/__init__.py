@@ -4,6 +4,7 @@
     persist hook         Hook handler (Stop + PreToolUse)
     persist stop         Cancel a running session
     persist status       Show session status (always exits 0)
+    persist status -s    One-line status for statuslines (--short)
     persist active       Exit 0 if a live session is running, else 1
 """
 
@@ -27,7 +28,7 @@ def main():
     elif cmd == 'stop':
         stop()
     elif cmd == 'status':
-        status()
+        status(short=any(a in ('-s', '--short') for a in sys.argv[2:]))
     elif cmd == 'active':
         active()
     else:

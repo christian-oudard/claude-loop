@@ -75,6 +75,10 @@ def run_status(cwd):
     return run_persist(cwd, "status", "")
 
 
+def run_status_short(cwd):
+    return run_main(cwd, ["status", "--short"])
+
+
 def run_active(cwd):
     return run_persist(cwd, "active", "")
 

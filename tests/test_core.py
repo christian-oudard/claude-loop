@@ -11,8 +11,8 @@ import persist
 
 from helpers import (
     make_project, read_session, write_session,
-    run_main, run_start, run_status, run_active, run_hook, run_persist,
-    make_stop_event, make_pre_tool_use_event,
+    run_main, run_start, run_status, run_status_short, run_active, run_hook,
+    run_persist, make_stop_event, make_pre_tool_use_event,
 )
 
 
@@ -251,6 +251,39 @@ class TestStart:
         assert result.returncode == 0
         assert "No active session" in result.stdout
         assert not (tmp_path / ".claude").exists()
+
+    def test_status_short_active(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        write_session(dot_claude, 3, "Fix the bug", 5)
+        result = run_status_short(proj)
+        assert result.returncode == 0
+        line = result.stdout.strip()
+        assert line.startswith("persist ")
+        assert not line.startswith("persist --lock")
+        assert "3/5" in line
+
+    def test_status_short_locked(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        write_session(dot_claude, 3, "Fix the bug", 5, lock=True)
+        result = run_status_short(proj)
+        assert result.returncode == 0
+        assert result.stdout.strip().startswith("persist --lock ")
+
+    def test_status_short_inactive(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        result = run_status_short(proj)
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    def test_status_short_done(self, tmp_path):
+        proj, dot_claude = make_project(tmp_path)
+        write_session(dot_claude, 3, "Fix the bug", 5)
+        state = read_session(dot_claude)
+        state["done"] = True
+        (dot_claude / "persist.json").write_text(json.dumps(state))
+        result = run_status_short(proj)
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
 
     def test_active_with_session(self, tmp_path):
         proj, dot_claude = make_project(tmp_path)
