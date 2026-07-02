@@ -292,6 +292,29 @@ class TestStart:
         assert result.returncode == 0
         assert result.stdout == ""
 
+
+class TestMain:
+    def test_help_flag(self, tmp_path):
+        result = run_main(tmp_path, ["--help"])
+        assert result.returncode == 0
+        assert "persist status" in result.stdout
+
+    def test_h_flag(self, tmp_path):
+        result = run_main(tmp_path, ["-h"])
+        assert result.returncode == 0
+        assert "persist status" in result.stdout
+
+    def test_help_flag_after_subcommand(self, tmp_path):
+        result = run_main(tmp_path, ["status", "--help"])
+        assert result.returncode == 0
+        assert "persist status" in result.stdout
+        assert "No active session" not in result.stdout
+
+    def test_unknown_command(self, tmp_path):
+        result = run_main(tmp_path, ["bogus"])
+        assert result.returncode == 2
+        assert "unknown command: bogus" in result.stderr
+
     def test_active_no_session_no_side_effects(self, tmp_path):
         (tmp_path / ".git").mkdir()
         result = run_active(tmp_path)

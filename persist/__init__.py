@@ -20,7 +20,11 @@ from .session import (  # noqa: F401
 
 
 def main():
-    cmd = sys.argv[1] if len(sys.argv) > 1 else None
+    args = sys.argv[1:]
+    if '-h' in args or '--help' in args:
+        print(__doc__.strip())
+        return
+    cmd = args[0] if args else None
     if cmd is None:
         start()
     elif cmd == 'hook':
