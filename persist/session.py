@@ -121,12 +121,13 @@ def start():
         print("Usage: /persist:go [--lock|-l] LIMIT PURPOSE", file=sys.stderr)
         sys.exit(1)
 
-    total, deadline = parse_limit(parts[0])
+    now = time.time()
+    total, deadline = parse_limit(parts[0], now=now)
     prompt = parts[1]
     state = {
         'iteration': 0, 'prompt': prompt,
         'total': total, 'deadline': deadline,
-        'started': time.time(),
+        'started': now,
     }
     if lock:
         state['lock'] = True

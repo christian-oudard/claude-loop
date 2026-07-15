@@ -31,13 +31,19 @@ def dot_claude_dir(create=False):
     return None
 
 
-def parse_limit(s):
+def parse_limit(s, now=None):
     """Parse a limit string into (total_iterations, deadline_timestamp).
 
     Returns a tuple where at most one value is non-None.
     Both are None for forever (no limit).
     Raises ValueError for unparseable input.
+
+    `now` anchors relative deadlines; the caller passes the same value it
+    records as `started` so that `deadline - started` equals the nominal
+    duration exactly, not a hair less from two separate clock reads.
     """
+    if now is None:
+        now = time.time()
     s = s.strip()
 
     # Forever: "forever"
@@ -47,11 +53,11 @@ def parse_limit(s):
     # Duration: "2h", "30m"
     m = re.match(r'^(\d+)h$', s, re.IGNORECASE)
     if m:
-        return None, time.time() + int(m.group(1)) * 3600
+        return None, now + int(m.group(1)) * 3600
 
     m = re.match(r'^(\d+)m$', s, re.IGNORECASE)
     if m:
-        return None, time.time() + int(m.group(1)) * 60
+        return None, now + int(m.group(1)) * 60
 
     # Clock time: "2pm", "11am"
     m = re.match(r'^(\d{1,2})(am|pm)$', s, re.IGNORECASE)
@@ -61,12 +67,12 @@ def parse_limit(s):
             hour += 12
         elif m.group(2).lower() == 'am' and hour == 12:
             hour = 0
-        return None, _next_occurrence(hour, 0)
+        return None, _next_occurrence(hour, 0, now)
 
     # HH:MM format
     m = re.match(r'^(\d{1,2}):(\d{2})$', s)
     if m:
-        return None, _next_occurrence(int(m.group(1)), int(m.group(2)))
+        return None, _next_occurrence(int(m.group(1)), int(m.group(2)), now)
 
     # Pure number
     n = int(s)
@@ -75,15 +81,15 @@ def parse_limit(s):
         hour, minute = divmod(n, 100)
         if hour > 23 or minute > 59:
             raise ValueError(f"Invalid military time: {s}")
-        return None, _next_occurrence(hour, minute)
+        return None, _next_occurrence(hour, minute, now)
     if n < 1:
         raise ValueError(f"Iteration count must be >= 1: {s}")
     return n, None
 
 
-def _next_occurrence(hour, minute):
+def _next_occurrence(hour, minute, now=None):
     """Return Unix timestamp for the next occurrence of HH:MM."""
-    now = datetime.now()
+    now = datetime.fromtimestamp(now) if now is not None else datetime.now()
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)

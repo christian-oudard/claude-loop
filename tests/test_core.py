@@ -41,6 +41,12 @@ class TestParseLimit:
         assert total is None
         assert before + 1800 <= deadline <= time.time() + 1800
 
+    def test_duration_anchored_to_provided_now(self):
+        # The caller passes the same `now` it records as `started` so the
+        # deadline lands exactly one nominal duration later.
+        _, deadline = persist.parse_limit("4h", now=1000.0)
+        assert deadline == 1000.0 + 4 * 3600
+
     def test_military_time(self):
         total, deadline = persist.parse_limit("1400")
         assert total is None
@@ -601,6 +607,16 @@ class TestFormatRemaining:
         assert "2, " in result
         assert "/" in result
         assert "remaining" not in result
+
+    def test_total_duration_matches_nominal(self):
+        # Regression: a fresh 4h session must read "/4h00m", not "/3h59m".
+        # deadline and started share one clock, so no sub-second truncation.
+        now = time.time()
+        _, deadline = persist.parse_limit("4h", now=now)
+        result = persist.format_remaining({
+            "iteration": 0, "deadline": deadline, "started": now,
+        })
+        assert result.endswith("/4h00m")
 
     def test_deadline_without_started(self):
         result = persist.format_remaining({
