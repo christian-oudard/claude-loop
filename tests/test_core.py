@@ -111,13 +111,23 @@ class TestIsExpired:
 
 class TestFindKeyword:
     def test_task_complete(self):
-        assert persist.find_keyword("blah TASK_COMPLETE blah") == "TASK_COMPLETE"
+        assert persist.find_keyword("<TASK_COMPLETE>") == "TASK_COMPLETE"
 
     def test_review_okay(self):
-        assert persist.find_keyword("REVIEW_OKAY") == "REVIEW_OKAY"
+        assert persist.find_keyword("<REVIEW_OKAY>") == "REVIEW_OKAY"
 
-    def test_review_incomplete(self):
-        assert persist.find_keyword("some text REVIEW_INCOMPLETE more") == "REVIEW_INCOMPLETE"
+    def test_tag_after_summary(self):
+        assert persist.find_keyword(
+            "Wrote the parser and its tests.\n\n<TASK_COMPLETE>"
+        ) == "TASK_COMPLETE"
+
+    def test_review_incomplete_after_description(self):
+        assert persist.find_keyword(
+            "The migration script is still untested.\n\n<REVIEW_INCOMPLETE>"
+        ) == "REVIEW_INCOMPLETE"
+
+    def test_surrounding_whitespace(self):
+        assert persist.find_keyword("  <TASK_COMPLETE>  \n\n") == "TASK_COMPLETE"
 
     def test_no_keyword(self):
         assert persist.find_keyword("just normal text") is None
@@ -125,12 +135,24 @@ class TestFindKeyword:
     def test_empty(self):
         assert persist.find_keyword("") is None
 
-    def test_priority_review_okay_first(self):
-        """REVIEW_OKAY beats TASK_COMPLETE when both appear in text."""
-        assert persist.find_keyword("TASK_COMPLETE REVIEW_OKAY") == "REVIEW_OKAY"
+    def test_bare_word_is_not_a_signal(self):
+        assert persist.find_keyword("TASK_COMPLETE") is None
 
-    def test_priority_review_incomplete_over_task_complete(self):
-        assert persist.find_keyword("TASK_COMPLETE REVIEW_INCOMPLETE") == "REVIEW_INCOMPLETE"
+    def test_negated_in_prose(self):
+        """Discussing a tag is not signalling it."""
+        assert persist.find_keyword(
+            "Not <TASK_COMPLETE>: the full-scale run hasn't finished."
+        ) is None
+
+    def test_quoted_instructions(self):
+        assert persist.find_keyword(
+            "- <REVIEW_OKAY> , the purpose is fully achieved."
+        ) is None
+
+    def test_last_tag_wins(self):
+        assert persist.find_keyword(
+            "<TASK_COMPLETE>\n\nOn reflection, no.\n\n<REVIEW_INCOMPLETE>"
+        ) == "REVIEW_INCOMPLETE"
 
 
 # --- Integration tests: start() ---
@@ -356,7 +378,7 @@ class TestHookStateMachine:
         proj, dot_claude = make_project(tmp_path)
         write_session(dot_claude, 2, "Build feature X", 5)
 
-        decision = run_hook(proj, make_stop_event("Done! TASK_COMPLETE"))
+        decision = run_hook(proj, make_stop_event("Done!\n\n<TASK_COMPLETE>"))
 
         assert decision["decision"] == "block"
         assert "Verification" in decision["reason"]
@@ -366,7 +388,7 @@ class TestHookStateMachine:
         write_session(dot_claude, 3, "Build feature X", 5)
 
         # REVIEW_OKAY starts the final summary turn: session kept (done), silent.
-        decision = run_hook(proj, make_stop_event("Everything looks good. REVIEW_OKAY"))
+        decision = run_hook(proj, make_stop_event("Everything looks good.\n\n<REVIEW_OKAY>"))
         assert decision["decision"] == "block"
         assert "verified" in decision["reason"].lower()
         assert read_session(dot_claude)["done"] is True
@@ -383,7 +405,7 @@ class TestHookStateMachine:
         write_session(dot_claude, 1, "debug", 1)
 
         decision = run_hook(proj, make_stop_event(
-            "Looks good. REVIEW_OKAY"))
+            "Looks good.\n\n<REVIEW_OKAY>"))
 
         assert decision["decision"] == "block"
         assert "verified" in decision["reason"].lower()
@@ -394,7 +416,7 @@ class TestHookStateMachine:
         proj, dot_claude = make_project(tmp_path)
         write_session(dot_claude, 3, "Build feature X", 5)
 
-        decision = run_hook(proj, make_stop_event("Found a bug. REVIEW_INCOMPLETE"))
+        decision = run_hook(proj, make_stop_event("Found a bug.\n\n<REVIEW_INCOMPLETE>"))
 
         assert decision["decision"] == "block"
         assert read_session(dot_claude)["iteration"] == 4
@@ -433,7 +455,7 @@ class TestHookStateMachine:
     def test_curly_braces_in_verification(self, tmp_path):
         proj, dot_claude = make_project(tmp_path)
         write_session(dot_claude, 2, "Update {foo} and {bar}", 5)
-        decision = run_hook(proj, make_stop_event("Done! TASK_COMPLETE"))
+        decision = run_hook(proj, make_stop_event("Done!\n\n<TASK_COMPLETE>"))
         assert "Update {foo} and {bar}" in decision["reason"]
 
     def test_multiline_prompt_in_hook(self, tmp_path):
@@ -462,11 +484,11 @@ class TestHookStateMachine:
         assert read_session(dot_claude)["iteration"] == 2
 
         # 4. TASK_COMPLETE -> verification
-        d = run_hook(proj, make_stop_event("All done. TASK_COMPLETE"))
+        d = run_hook(proj, make_stop_event("All done.\n\n<TASK_COMPLETE>"))
         assert "Verification" in d["reason"]
 
         # 5. REVIEW_OKAY -> final summary turn (session kept, marked done)
-        d = run_hook(proj, make_stop_event("Verified. REVIEW_OKAY"))
+        d = run_hook(proj, make_stop_event("Verified.\n\n<REVIEW_OKAY>"))
         assert "verified" in d["reason"].lower()
         assert read_session(dot_claude)["done"] is True
 
@@ -587,7 +609,7 @@ class TestStartedField:
         write_session(dot_claude, 2, "Build it", total=5,
                       started=started)
 
-        run_hook(proj, make_stop_event("Done! TASK_COMPLETE"))
+        run_hook(proj, make_stop_event("Done!\n\n<TASK_COMPLETE>"))
         data = read_session(dot_claude)
         assert data["started"] == started
 
@@ -658,7 +680,7 @@ class TestForever:
         proj, dot_claude = make_project(tmp_path)
         write_session(dot_claude, 5, "Fix bugs")
 
-        decision = run_hook(proj, make_stop_event("Done! TASK_COMPLETE"))
+        decision = run_hook(proj, make_stop_event("Done!\n\n<TASK_COMPLETE>"))
         assert "Verification" in decision["reason"]
 
     def test_forever_review_okay_ends(self, tmp_path):
@@ -666,7 +688,7 @@ class TestForever:
         proj, dot_claude = make_project(tmp_path)
         write_session(dot_claude, 5, "Fix bugs")
 
-        decision = run_hook(proj, make_stop_event("REVIEW_OKAY"))
+        decision = run_hook(proj, make_stop_event("<REVIEW_OKAY>"))
         assert "verified" in decision["reason"].lower()
         assert read_session(dot_claude)["done"] is True
 
@@ -675,7 +697,7 @@ class TestForever:
         proj, dot_claude = make_project(tmp_path)
         write_session(dot_claude, 50, "Fix bugs", lock=True)
 
-        decision = run_hook(proj, make_stop_event("TASK_COMPLETE REVIEW_OKAY"))
+        decision = run_hook(proj, make_stop_event("<TASK_COMPLETE>\n\n<REVIEW_OKAY>"))
         # Should continue despite both keywords
         assert "Iteration" in decision["reason"]
         assert read_session(dot_claude)["iteration"] == 51
@@ -719,15 +741,15 @@ class TestLock:
     def test_lock_prompt_omits_task_complete(self, tmp_path):
         proj, dot_claude = make_project(tmp_path)
         result = run_start(proj, "--lock 3 Do stuff")
-        assert "TASK_COMPLETE" not in result.stdout
+        assert "<TASK_COMPLETE>" not in result.stdout
         assert "locked session" in result.stdout.lower()
-        assert "no completion keyword" in result.stdout.lower()
+        assert "no completion tag" in result.stdout.lower()
 
     def test_lock_ignores_task_complete(self, tmp_path):
         proj, dot_claude = make_project(tmp_path)
         write_session(dot_claude, 2, "Build it", total=5, lock=True)
 
-        decision = run_hook(proj, make_stop_event("Done! TASK_COMPLETE"))
+        decision = run_hook(proj, make_stop_event("Done!\n\n<TASK_COMPLETE>"))
         # Should continue, not trigger verification
         assert "Verification" not in decision["reason"]
         assert "Iteration" in decision["reason"]
@@ -739,7 +761,7 @@ class TestLock:
         proj, dot_claude = make_project(tmp_path)
         write_session(dot_claude, 2, "Build it", total=5, lock=True)
 
-        decision = run_hook(proj, make_stop_event("REVIEW_OKAY"))
+        decision = run_hook(proj, make_stop_event("<REVIEW_OKAY>"))
         # Should continue, not end session
         assert "verified" not in decision["reason"].lower()
         assert "locked session" in decision["reason"].lower()
@@ -750,7 +772,7 @@ class TestLock:
         proj, dot_claude = make_project(tmp_path)
         write_session(dot_claude, 3, "Do stuff", total=3, lock=True)
 
-        decision = run_hook(proj, make_stop_event("TASK_COMPLETE"))
+        decision = run_hook(proj, make_stop_event("<TASK_COMPLETE>"))
         assert "exhausted" in decision["reason"].lower()
         assert read_session(dot_claude)["done"] is True
         assert run_hook(proj, make_stop_event("Summary.")) is None
@@ -761,7 +783,7 @@ class TestLock:
         write_session(dot_claude, 2, "Do stuff",
                       deadline=time.time() - 1, lock=True)
 
-        decision = run_hook(proj, make_stop_event("REVIEW_OKAY"))
+        decision = run_hook(proj, make_stop_event("<REVIEW_OKAY>"))
         assert "time limit" in decision["reason"].lower()
         assert read_session(dot_claude)["done"] is True
 
@@ -780,7 +802,7 @@ class TestLock:
         write_session(dot_claude, 1, "Build it", total=5, lock=True)
 
         decision = run_hook(proj, make_stop_event("Progress."))
-        assert "TASK_COMPLETE" not in decision["reason"]
+        assert "<TASK_COMPLETE>" not in decision["reason"]
 
 
 class TestFinishingState:
@@ -813,11 +835,11 @@ class TestFinishingState:
         write_session(dot_claude, 2, "Build X", 5)
 
         # TASK_COMPLETE -> verification turn; still active.
-        run_hook(proj, make_stop_event("Done. TASK_COMPLETE"))
+        run_hook(proj, make_stop_event("Done.\n\n<TASK_COMPLETE>"))
         assert run_active(proj).returncode == 0
 
         # REVIEW_OKAY -> summary turn; still active.
-        run_hook(proj, make_stop_event("Verified. REVIEW_OKAY"))
+        run_hook(proj, make_stop_event("Verified.\n\n<REVIEW_OKAY>"))
         assert run_active(proj).returncode == 0
 
         # Summary turn ends -> now inactive, the bell may ring.

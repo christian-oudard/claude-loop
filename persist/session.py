@@ -12,7 +12,7 @@ You are in a persistent coding loop. Each time you stop, you will receive \
 this same prompt again. Your work persists in files and git history."""
 
 LOCK_NOTICE = """\
-This is a locked session. There is no completion keyword, and there is \
+This is a locked session. There is no completion tag, and there is \
 more work to do. Each iteration, think about what the next most valuable \
 thing to work on is."""
 
@@ -26,11 +26,11 @@ expected; each setback narrows the problem. If everything obvious is \
 done, look deeper."""
 
 EXIT_INSTRUCTIONS = """\
-If the purpose is genuinely and fully achieved, output exactly TASK_COMPLETE \
-as a standalone message. Treat this as a factual assertion, not an escape \
-hatch. Only say it when it is unambiguously true. If you are stuck or \
-frustrated, do not use it to bail out. The next iteration is a fresh \
-chance to try something different."""
+If the purpose is genuinely and fully achieved, end your message with the \
+tag <TASK_COMPLETE> alone on its own line. Only send it when it is unambiguous \
+that your task is actually complete. If you are stuck or frustrated, do not \
+use it to bail out; instead, the next iteration is a fresh chance to try \
+something different."""
 
 VERIFICATION = """\
 You claimed the purpose is achieved. Before confirming, do a thorough review:
@@ -40,12 +40,12 @@ You claimed the purpose is achieved. Before confirming, do a thorough review:
 3. Run the tests or otherwise verify the implementation works end-to-end.
 4. Check for edge cases, missing requirements, or loose ends.
 
-After your review, output exactly one of these keywords as a standalone \
-message:
+After your review, end your message with exactly one of these tags, alone \
+on its own line:
 
-- REVIEW_OKAY — the purpose is fully and genuinely achieved.
-- REVIEW_INCOMPLETE — you found something incomplete or broken. Briefly \
-describe what remains before the keyword."""
+- <REVIEW_OKAY> , the purpose is fully and genuinely achieved.
+- <REVIEW_INCOMPLETE> , you found something incomplete or broken. Briefly \
+describe what remains, and print the tag."""
 
 
 def work_prompt(*, prompt, iteration_label, lock=False, first=False):
@@ -243,7 +243,7 @@ def stop_hook(state, event):
         wp = work_prompt(prompt=prompt, iteration_label=_iteration_label(iteration), lock=lock)
         if lock and keyword:
             wp = ("You indicated you are done, however this is a locked "
-                  "session with no completion keyword. There is more work "
+                  "session with no completion tag. There is more work "
                   "to do. Think about what the next most valuable thing to "
                   "work on is.\n\n" + wp)
         print(json.dumps({
@@ -252,14 +252,20 @@ def stop_hook(state, event):
         }))
 
 
+TAGS = ('<REVIEW_OKAY>', '<REVIEW_INCOMPLETE>', '<TASK_COMPLETE>')
+
+
 def find_keyword(text):
-    """Check text for a session keyword.
+    """Check text for a session signal.
 
     Returns 'REVIEW_OKAY', 'REVIEW_INCOMPLETE', 'TASK_COMPLETE', or None.
-    REVIEW_* checked first: the model may reference TASK_COMPLETE in prose
-    while giving a review answer.
+
+    A signal is a tag alone on its own line. The angle brackets keep the tag
+    distinct from the bare word an agent uses when talking about the loop, and
+    the own-line rule keeps a quoted or negated tag from firing. Both matter:
+    an agent writing "not <TASK_COMPLETE>, the run is still going" must not
+    trigger verification. The last matching line wins, so REVIEW_INCOMPLETE
+    can follow a description of what remains, as its instructions ask.
     """
-    for kw in ('REVIEW_OKAY', 'REVIEW_INCOMPLETE', 'TASK_COMPLETE'):
-        if kw in text:
-            return kw
-    return None
+    matches = [line.strip() for line in text.splitlines() if line.strip() in TAGS]
+    return matches[-1].strip('<>') if matches else None

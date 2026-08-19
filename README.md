@@ -3,10 +3,10 @@
 Persistent coding sessions for Claude Code. Re-injects the same task each iteration using a stop hook, keeping work going across multiple turns without manual intervention.
 
 ```
-Work iteration  -> TASK_COMPLETE      -> verification prompt
-Verification    -> REVIEW_OKAY       -> done
-Verification    -> REVIEW_INCOMPLETE  -> back to work
-Any iteration   -> limit reached      -> done
+Work iteration  -> <TASK_COMPLETE>      -> verification prompt
+Verification    -> <REVIEW_OKAY>        -> done
+Verification    -> <REVIEW_INCOMPLETE>  -> back to work
+Any iteration   -> limit reached        -> done
 ```
 
 ## Install

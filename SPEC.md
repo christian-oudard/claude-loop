@@ -39,9 +39,11 @@ A session winds down to a final summary turn, then ends, when any of these condi
 
 - **Iteration limit** reached
 - **Deadline** reached
-- **Task completion**: Claude outputs TASK_COMPLETE, then confirms with REVIEW_OKAY after the verification turn
+- **Task completion**: Claude signals `<TASK_COMPLETE>`, then confirms with `<REVIEW_OKAY>` after the verification turn
 
-With `--lock`, task completion keywords are ignored. The session runs until its iteration or deadline limit. If the agent attempts to use a completion keyword anyway, the prompt explicitly tells it this is a locked session and it cannot exit.
+Signals are angle-bracket tags, and only count when a tag stands alone on its own line. Talking about a tag in a sentence is discussion, not a signal, so "not `<TASK_COMPLETE>`, the run is still going" leaves the session running. The rule also lets `<REVIEW_INCOMPLETE>` follow a description of what remains. When several tags appear on their own lines, the last one wins.
+
+With `--lock`, completion tags are ignored. The session runs until its iteration or deadline limit. If the agent attempts to use a completion tag anyway, the prompt explicitly tells it this is a locked session and it cannot exit.
 
 ## Work Prompt
 
