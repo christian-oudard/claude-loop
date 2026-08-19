@@ -124,8 +124,11 @@ def start():
     now = time.time()
     total, deadline = parse_limit(parts[0], now=now)
     prompt = parts[1]
+    # Iteration 1 is the turn this prompt starts, so the state records 1 and
+    # each stop hook moves to the next number. Starting at 0 would label the
+    # first hook's prompt "1" a second time, and run one turn past the limit.
     state = {
-        'iteration': 0, 'prompt': prompt,
+        'iteration': 1, 'prompt': prompt,
         'total': total, 'deadline': deadline,
         'started': now,
     }

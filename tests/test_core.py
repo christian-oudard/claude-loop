@@ -163,7 +163,9 @@ class TestStart:
         result = run_start(proj, "5 Fix the bug")
         assert result.returncode == 0
         state = read_session(dot_claude)
-        assert state["iteration"] == 0
+        # The state records the iteration now in progress, and start() prints
+        # the prompt for iteration 1, so the count begins at 1.
+        assert state["iteration"] == 1
         assert state["prompt"] == "Fix the bug"
         assert state["total"] == 5
 
@@ -465,23 +467,37 @@ class TestHookStateMachine:
         decision = run_hook(proj, make_stop_event("Progress made."))
         assert task in decision["reason"]
 
+    def test_labels_count_up_without_repeating(self, tmp_path):
+        """Each work prompt gets the next label, and a limit of N runs N of them."""
+        proj, _ = make_project(tmp_path)
+        result = run_start(proj, "3 Do stuff")
+        labels = [result.stdout]
+        for _ in range(2):
+            labels.append(run_hook(proj, make_stop_event("Progress."))["reason"])
+        assert [l.splitlines()[0] for l in labels] == [
+            "# Iteration 1", "# Iteration 2", "# Iteration 3"]
+
+        # The third prompt was the last one the limit allows.
+        decision = run_hook(proj, make_stop_event("Progress."))
+        assert "exhausted" in decision["reason"].lower()
+
     def test_full_lifecycle(self, tmp_path):
         """Full start -> hook iterations -> task complete -> done."""
         proj, dot_claude = make_project(tmp_path)
 
-        # 1. Start: writes session
+        # 1. Start: writes session, iteration 1 in progress
         result = run_start(proj, "5 Create hello.txt")
         assert result.returncode == 0
-        assert read_session(dot_claude)["iteration"] == 0
-
-        # 2. First Stop: iteration 1
-        d = run_hook(proj, make_stop_event("Starting work."))
-        assert d["decision"] == "block"
         assert read_session(dot_claude)["iteration"] == 1
 
-        # 3. Second Stop: iteration 2
-        d = run_hook(proj, make_stop_event("Created the file."))
+        # 2. First Stop: iteration 2
+        d = run_hook(proj, make_stop_event("Starting work."))
+        assert d["decision"] == "block"
         assert read_session(dot_claude)["iteration"] == 2
+
+        # 3. Second Stop: iteration 3
+        d = run_hook(proj, make_stop_event("Created the file."))
+        assert read_session(dot_claude)["iteration"] == 3
 
         # 4. TASK_COMPLETE -> verification
         d = run_hook(proj, make_stop_event("All done.\n\n<TASK_COMPLETE>"))
